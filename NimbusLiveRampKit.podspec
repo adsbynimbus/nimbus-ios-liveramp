@@ -16,4 +16,7 @@ Pod::Spec.new do |spec|
         :git => "https://github.com/adsbynimbus/nimbus-ios-liveramp.git", 
         :tag => spec.version.to_s
     }
+
+    spec.dependency 'NimbusSDK/NimbusKit', '~> 3'
+    spec.dependency 'LRAtsSDK', '~> 2.5'
 end
