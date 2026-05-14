@@ -56,7 +56,7 @@ import Testing
         
         try await assertFetchEnvelope(using: liveRamp)
         
-        let ad = try Nimbus.bannerAd(position: "position", size: .banner)
+        let ad = Nimbus.bannerAd(position: "position", size: .banner)
         try await ad.adRequest!.request.modifyRequestWithExtras(
             configuration: Nimbus.configuration,
             vendorId: "",
@@ -70,34 +70,27 @@ import Testing
         let liveRampEID = eids?.first(where: { $0.source == "liveramp.com" })
         
         #expect(liveRampEID != nil)
-        #expect(liveRampEID?.uids[0].ext["rtiPartner"] == "idl")
+        #expect(liveRampEID?.uids.first?.ext["rtiPartner"] == "idl")
         
         let pairEID = eids?.first(where: { $0.source == "google.com" })
         #expect(pairEID != nil)
-        #expect(pairEID?.uids[0].atype == 571187)
+        #expect(pairEID?.uids.first?.atype == 571187)
     }
     
     private func assertFetchEnvelope(using: LiveRamp, sourceLocation: SourceLocation = #_sourceLocation) async throws {
         let envelope = try await using.fetchEnvelope(isTestMode: true)
         envelope.applyToNimbus()
         
-        let liveRampExtendedId = Nimbus.configuration.extendedIds["liveramp.com"]
-        
+        let liveRampExtendedId = Nimbus.configuration.identity.extendedIds["liveramp.com"]
+
         #expect(liveRampExtendedId?.source == "liveramp.com", sourceLocation: sourceLocation)
         #expect(liveRampExtendedId?.uids.count == 1, sourceLocation: sourceLocation)
-        #expect(liveRampExtendedId?.uids[0].id == envelope.envelope!, sourceLocation: sourceLocation)
-        #expect(liveRampExtendedId?.uids[0].ext == ["rtiPartner": "idl"], sourceLocation: sourceLocation)
-        
-        let liveRampPairIds = Nimbus.configuration.extendedIds["google.com"]
-        let uids = envelope.pairIds!.map { RTB.EID.UID(id: $0, atype: 571187) }
-        
+        #expect(liveRampExtendedId?.uids.contains { $0.id == envelope.envelope! && $0.ext == ["rtiPartner": "idl"] } == true, sourceLocation: sourceLocation)
+
+        let liveRampPairIds = Nimbus.configuration.identity.extendedIds["google.com"]
+        let expectedUids = Set(envelope.pairIds!.map { RTB.UID(id: $0, atype: 571187) })
+
         #expect(liveRampPairIds?.source == "google.com", sourceLocation: sourceLocation)
-        
-        
-        for i in 0..<uids.count {
-            let uid = liveRampPairIds!.uids[i]
-            #expect(uid.id == uids[i].id, sourceLocation: sourceLocation)
-            #expect(uid.atype == 571187, sourceLocation: sourceLocation)
-        }
+        #expect(liveRampPairIds?.uids == expectedUids, sourceLocation: sourceLocation)
     }
 }

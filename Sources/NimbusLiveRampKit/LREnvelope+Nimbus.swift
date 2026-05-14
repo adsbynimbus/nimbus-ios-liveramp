@@ -22,20 +22,16 @@ extension LREnvelope {
     @MainActor
     public func applyToNimbus() {
         if let unwrappedEnvelope = envelope {
-            Nimbus.EID.set(
-                .init(
-                    source: "liveramp.com",
-                    uids: [.init(id: unwrappedEnvelope, extensions: ["rtiPartner": "idl"])]
-                )
+            Nimbus.configuration.identity.add(
+                source: "liveramp.com",
+                ids: [.init(id: unwrappedEnvelope, extensions: ["rtiPartner": "idl"])]
             )
         }
         
         if let pairIds = pairIds {
-            Nimbus.EID.set(
-                .init(
-                    source: "google.com",
-                    uids: pairIds.map { .init(id: $0, atype: 571187) }
-                )
+            Nimbus.configuration.identity.add(
+                source: "google.com",
+                ids: Set(pairIds.map { .init(id: $0, atype: 571187) })
             )
         }
     }
