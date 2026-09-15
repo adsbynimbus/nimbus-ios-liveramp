@@ -10,15 +10,11 @@ var package = Package(
            name: "NimbusLiveRampKit",
            targets: ["NimbusLiveRampKit"])
     ],
-    dependencies: [
-        .package(url: "https://github.com/LiveRamp/ats-sdk-ios", from: "2.5.0")
-    ],
     targets: [
         .target(
             name: "NimbusLiveRampKit",
             dependencies: [
-                .product(name: "NimbusKit", package: "nimbus-ios-sdk"),
-                .product(name: "LRAtsSDK", package: "ats-sdk-ios")
+                .product(name: "NimbusKit", package: "nimbus-ios-sdk")
             ]
         ),
         .testTarget(

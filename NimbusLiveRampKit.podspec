@@ -18,5 +18,4 @@ Pod::Spec.new do |spec|
     }
 
     spec.dependency 'NimbusSDK/NimbusKit', '~> 3'
-    spec.dependency 'LRAtsSDK', '~> 2.5'
 end
