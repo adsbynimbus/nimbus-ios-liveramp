@@ -10,14 +10,33 @@ import Foundation
 @testable import NimbusKit
 @testable import NimbusLiveRampKit
 
-// MARK: - LiveRamp.initialize
+// MARK: - LiveRamp object tests
 
-@Suite("Initialize tests")
-struct InitializeTests {
-    @Test func initializeThrowsIfNoIdentifierIsPassed() async throws {
+@Suite("LiveRamp Tests")
+struct LiveRampTests {
+    @Test("Initialize throws if no identifiers are passed")
+    func initializeThrowsIfNoIdentifierIsPassed() async throws {
         await #expect(throws: LiveRampError.missingIdentifier) {
             try await LiveRamp.initialize(placementId: "123", identifiers: [])
         }
+    }
+    
+    @Test("A recently refreshed stored envelope is still applied to Nimbus")
+    @MainActor func recentlyStoredEnvelopeIsApplied() async throws {
+        defer {
+            LiveRamp.clear()
+            Nimbus.configuration.identity.clear()
+        }
+
+        LiveRamp.store(Sample.response(
+            envelopes: [Sample.envelope(19, value: "stored-envelope")],
+            lastRefreshTime: Date().addingTimeInterval(-60)
+        ))
+
+        try await LiveRamp.updateEnvelope(placementId: "14", appId: "com.example.app")
+
+        let eid = try #require(Nimbus.configuration.identity.extendedIds["liveramp.com"])
+        #expect(eid.uids.first?.id == "stored-envelope")
     }
 }
 
@@ -485,6 +504,7 @@ struct RefreshRequestTests {
 /// These share `UserDefaults.standard`, so they run one at a time and clear the
 /// key before and after each test.
 @Suite("Storage", .serialized)
+@MainActor
 struct StorageTests {
 
     init() {

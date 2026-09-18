@@ -1,16 +1,23 @@
 # NimbusLiveRampKit
-
-A Nimbus SDK extension for **LiveRamp**. It provides a `LiveRamp` object that can initialize LiveRamp, fetch the envelope, and apply it to all Nimbus requests.
-
-## Versioning
-
-NimbusLiveRampKit **major versions are kept in sync** with the LiveRamp SDK. For example, NimbusLiveRampKit `2.x.x` depends on LiveRamp SDK `2.x.x`.
  
-Minor and patch versions are independent — a NimbusLiveRampKit patch release does not necessarily correspond to a LiveRamp SDK patch release, and vice versa.
+A Nimbus SDK extension for **LiveRamp**. It provides a `LiveRamp` object that can initialize LiveRamp, fetch the envelope, and apply it to all Nimbus requests.
+ 
+## Versioning
+ 
+Starting with version `3.0`, NimbusLiveRampKit talks to the [ATS API](https://developers.liveramp.com/authenticatedtraffic-api/docs/ats-api-implementation-guide-for-mobile-publishers) directly and has no third-party dependencies. The LiveRamp SDK (LRAts) it previously wrapped is [scheduled to sunset in September 2026](https://developers.liveramp.com/authenticatedtraffic-api/changelog/ats-mobile-sdk-users-to-transition-to-ats-api).
+ 
+Versions follow [semantic versioning](https://semver.org) and are no longer tied to the LiveRamp SDK, so you can use the latest release.
+ 
+### Upgrading from 2.x
+ 
+NimbusLiveRampKit `2.x.x` depends on LiveRamp SDK `2.x.x` — major versions were kept in sync, while minor and patch versions were independent.
  
 | NimbusLiveRampKit | LiveRamp SDK |
 |---|---|
+| 3.x.x | none |
 | 2.x.x | 2.x.x |
+ 
+If you are still on `2.x`, upgrade before the LRAts sunset in September 2026.
 
 ## Installation
 

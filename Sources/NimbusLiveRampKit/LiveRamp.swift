@@ -30,7 +30,7 @@ public enum LiveRampError: LocalizedError, Equatable {
         case .missingAppId:
             "No app ID supplied and Bundle.main.bundleIdentifier was nil"
         case .missingIdentifier:
-            "No identifie supplied. At least one identifier is required to initialize LiveRamp."
+            "No identifier supplied. At least one identifier is required to initialize LiveRamp."
         case .noEnvelope:
             "No envelope returned - The user is opted out"
         case .requestFailure(let error):
@@ -48,9 +48,9 @@ public enum LiveRampError: LocalizedError, Equatable {
 /// internally.
 ///
 /// ```swift
-/// try await LiveRamp.fetchEnvelope(
+/// try await LiveRamp.initialize(
 ///     placementId: "14",
-///     identifiers: .email("user@example.com")
+///     identifiers: [.email("user@example.com")]
 /// )
 /// ```
 ///
@@ -64,12 +64,20 @@ public enum LiveRampError: LocalizedError, Equatable {
 /// [ATS API implementation guide for mobile publishers](https://developers.liveramp.com/authenticatedtraffic-api/docs/ats-api-implementation-guide-for-mobile-publishers).
 public final class LiveRamp {
     private static let baseUrl = "https://api.rlcdn.com/api/identity/v2/envelope"
-    private static let storedEnvelopeTTLSeconds: TimeInterval = 15 * 24 * 3600 // 15 days
-    private static let refreshIntervalSeconds: TimeInterval = 30 * 60 // 30 minutes
+    private static let storedEnvelopeTTLSeconds: TimeInterval = 15 * 24 * 3600  // 15 days
+    private static let refreshIntervalSeconds: TimeInterval = 30 * 60           // 30 minutes
+    private static let refreshFailureIntervalSeconds: TimeInterval = 5 * 60     // 5 minutes
+    
     static let storedEnvelopeKey = "NimbusLiveRampKit.envelope"
     
+    private struct RefreshState {
+        var task: Task<Void, Never>?
+        var nextRefreshAfter: Date = .distantPast
+        var config: (placementId: String, appId: String)?
+    }
+    
     @MainActor
-    private static var config: (placementId: String, appId: String)?
+    private static var refreshState = RefreshState()
     
     /// A user identifier to exchange for an identity envelope.
     ///
@@ -109,7 +117,6 @@ public final class LiveRamp {
     ///     `Bundle.main.bundleIdentifier`. Pass this explicitly when the runtime
     ///     bundle ID differs from the registered one, as in build configurations
     ///     that append a suffix, or in app extensions.
-    /// - Returns: The envelope response, already applied to Nimbus.
     /// - Throws: A ``LiveRampError`` for API-level failures, or a `URLError` if the
     ///   request itself did not complete. Task cancellation surfaces as
     ///   `URLError.cancelled`.
@@ -125,16 +132,27 @@ public final class LiveRamp {
             throw LiveRampError.missingAppId
         }
 
-        try await updateEnvelope(placementId: placementId, appId: appId, identifiers: identifiers)
-        
-        Task { @MainActor in
-            Self.config = (placementId: placementId, appId: appId)
-            LiveRampExtension().install()
+        do {
+            let response = try await updateEnvelope(placementId: placementId, appId: appId, identifiers: identifiers)
+            
+            await MainActor.run {
+                scheduleNextRefresh(after: response)
+                refreshState.config = (placementId: placementId, appId: appId)
+                LiveRampExtension().install()
+            }
+        } catch {
+            await scheduleNextRefresh(after: nil)
+            throw error
         }
     }
     
     @concurrent
-    static func updateEnvelope(placementId: String, appId: String, identifiers: [Identifier] = []) async throws {
+    @discardableResult
+    static func updateEnvelope(
+        placementId: String,
+        appId: String,
+        identifiers: [Identifier] = []
+    ) async throws -> EnvelopeResponse {
         let request = try prepareRequest(appId: appId, placementId: placementId)
         var response: EnvelopeResponse
 
@@ -142,7 +160,8 @@ public final class LiveRamp {
            storedEnvelope.lastRefreshTime.addingTimeInterval(storedEnvelopeTTLSeconds) > Date() {
             guard storedEnvelope.lastRefreshTime.addingTimeInterval(refreshIntervalSeconds) < Date() else {
                 logger.debug("Stored envelope was recently refreshed (\(storedEnvelope.lastRefreshTime)), not fetching a new one")
-                return
+                await storedEnvelope.applyToNimbus()
+                return storedEnvelope
             }
 
             logger.debug("Refreshing stored envelope")
@@ -157,14 +176,28 @@ public final class LiveRamp {
         }
 
         response.lastRefreshTime = Date()
+        try Task.checkCancellation()
         store(response)
         await response.applyToNimbus()
+        return response
     }
     
-    static func updateEnvelope() async throws {
-        guard let config = await config else { return }
-        
-        try await updateEnvelope(placementId: config.placementId, appId: config.appId)
+    @MainActor
+    static func updateEnvelope() {
+        guard refreshState.task == nil,
+              Date() > refreshState.nextRefreshAfter,
+              let config = refreshState.config else { return }
+
+        refreshState.task = Task {
+            defer { refreshState.task = nil }
+            
+            let response = try? await updateEnvelope(
+                placementId: config.placementId,
+                appId: config.appId
+            )
+            
+            scheduleNextRefresh(after: response)
+        }
     }
 
     /// Returns currently cached envelope or nil if none exists.
@@ -177,12 +210,12 @@ public final class LiveRamp {
     ///
     /// Call this method on logout. ``Nimbus.configuration.identity.clear()`` should be called as well
     /// to clear the applied identity.
+    @MainActor
     public static func clear() {
+        refreshState.task?.cancel()
+        refreshState = RefreshState()
         UserDefaults.standard.removeObject(forKey: storedEnvelopeKey)
-        Task { @MainActor in
-            Self.config = nil
-            LiveRampExtension.disable()
-        }
+        LiveRampExtension.disable()
     }
     
     /// Request Param types described in LiveRamp Docs: https://developers.liveramp.com/authenticatedtraffic-api/docs/4-call-the-ats-envelope-api
@@ -225,7 +258,7 @@ public final class LiveRamp {
         from request: URLRequest,
         identifiers: [Identifier]
     ) throws(LiveRampError) -> URLRequest {
-        guard !identifiers.isEmpty else {
+        guard identifiers.count > 0 else {
             throw LiveRampError.requestFailure("Cannot request a new envelope without identifiers")
         }
         
@@ -297,5 +330,12 @@ public final class LiveRamp {
     static func store(_ response: EnvelopeResponse) {
         guard let data = try? JSONEncoder().encode(response) else { return }
         UserDefaults.standard.set(data, forKey: storedEnvelopeKey)
+    }
+    
+    @MainActor
+    private static func scheduleNextRefresh(after response: EnvelopeResponse?) {
+        refreshState.nextRefreshAfter = response
+            .map { $0.lastRefreshTime.addingTimeInterval(refreshIntervalSeconds) }
+            ?? Date().addingTimeInterval(refreshFailureIntervalSeconds)
     }
 }

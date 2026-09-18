@@ -27,10 +27,7 @@ struct LiveRampExtension: NimbusRequestExtension {
 
 final class LiveRampInterceptor: NimbusRequest.Interceptor {
     func modifyRequest(request: NimbusRequest) async throws -> [NimbusRequest.Delta] {
-        Task.detached {
-            try await LiveRamp.updateEnvelope()
-        }
-        
+        await LiveRamp.updateEnvelope()
         return []
     }
 }
