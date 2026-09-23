@@ -55,13 +55,16 @@ public enum LiveRampError: LocalizedError, Equatable {
 /// ```
 ///
 /// One envelope is stored at a time, for the app's current user. Call ``clear()``
-/// together with ``Nimbus.configuration.identity.clear()`` on logout.
+/// together with `Nimbus.configuration.identity.clear()` on logout.
 ///
 /// The placement must exist in [LiveRamp Console](https://launch.liveramp.com) in
 /// an approved state, with the app's bundle ID registered on it.
 ///
 /// For the underlying API, see the
 /// [ATS API implementation guide for mobile publishers](https://developers.liveramp.com/authenticatedtraffic-api/docs/ats-api-implementation-guide-for-mobile-publishers).
+///
+/// ## See Also
+/// - ``NimbusKit/Configuration/IdentityProvider/clear()``
 public final class LiveRamp {
     private static let baseUrl = "https://api.rlcdn.com/api/identity/v2/envelope"
     private static let storedEnvelopeTTLSeconds: TimeInterval = 15 * 24 * 3600  // 15 days
@@ -206,10 +209,14 @@ public final class LiveRamp {
         return try? JSONDecoder().decode(EnvelopeResponse.self, from: data)
     }
 
-    /// Removes the stored envelope.
+    /// Clears the stored LiveRamp envelope.
     ///
-    /// Call this method on logout. ``Nimbus.configuration.identity.clear()`` should be called as well
-    /// to clear the applied identity.
+    /// One envelope is stored at a time, for the app's current user. Call this on
+    /// logout, along with `Nimbus.configuration.identity.clear()`, so that no
+    /// identity data outlives the session.
+    ///
+    /// ## See Also
+    /// - ``NimbusKit/Configuration/IdentityProvider/clear()``
     @MainActor
     public static func clear() {
         refreshState.task?.cancel()
