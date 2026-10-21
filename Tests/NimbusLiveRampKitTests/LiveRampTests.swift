@@ -12,8 +12,25 @@ import Foundation
 
 // MARK: - LiveRamp object tests
 
-@Suite("LiveRamp Tests")
+/// These mutate `Nimbus.configuration.identity`, which is global, so they run one
+/// at a time and reset it around each test.
+@Suite("LiveRamp Tests", .serialized)
+@MainActor
 struct LiveRampTests {
+    
+    /// Base64 of `["pair-id-1"]`.
+    static let onePairId = "WyJwYWlyLWlkLTEiXQ=="
+    /// Base64 of `["pair-id-1","pair-id-2"]`.
+    static let twoPairIds = "WyJwYWlyLWlkLTEiLCJwYWlyLWlkLTIiXQ=="
+    /// Base64 of `[]`.
+    static let noPairIds = "W10="
+    /// Base64 of `{"not":"an array"}` — decodes fine, but isn't `[String]`.
+    static let pairObject = "eyJub3QiOiJhbiBhcnJheSJ9"
+
+    init() {
+        Nimbus.configuration.identity.clear()
+    }
+    
     @Test("Initialize throws if no identifiers are passed")
     func initializeThrowsIfNoIdentifierIsPassed() async throws {
         await #expect(throws: LiveRampError.missingIdentifier) {
@@ -22,7 +39,7 @@ struct LiveRampTests {
     }
     
     @Test("A recently refreshed stored envelope is still applied to Nimbus")
-    @MainActor func recentlyStoredEnvelopeIsApplied() async throws {
+    func recentlyStoredEnvelopeIsApplied() async throws {
         defer {
             LiveRamp.clear()
             Nimbus.configuration.identity.clear()
@@ -37,6 +54,188 @@ struct LiveRampTests {
 
         let eid = try #require(Nimbus.configuration.identity.extendedIds["liveramp.com"])
         #expect(eid.uids.first?.id == "stored-envelope")
+    }
+
+    @Test("An ATS envelope registers under liveramp.com")
+    func atsEnvelope() throws {
+        defer { Nimbus.configuration.identity.clear() }
+
+        Sample.response(envelopes: [Sample.envelope(19, value: "ats-envelope")]).applyToNimbus()
+
+        let eid = try #require(Nimbus.configuration.identity.extendedIds["liveramp.com"])
+        #expect(eid.source == "liveramp.com")
+        #expect(eid.uids.count == 1)
+
+        let uid = try #require(eid.uids.first)
+        #expect(uid.id == "ats-envelope")
+        #expect(uid.ext["rtiPartner"] == "idl")
+    }
+
+    @Test("A PAIR envelope registers its decoded IDs under google.com")
+    func pairEnvelope() throws {
+        defer { Nimbus.configuration.identity.clear() }
+
+        Sample.response(envelopes: [
+            Sample.envelope(25, value: Self.onePairId, source: "pairIds")
+        ]).applyToNimbus()
+
+        let eid = try #require(Nimbus.configuration.identity.extendedIds["google.com"])
+        #expect(eid.uids.count == 1)
+
+        let uid = try #require(eid.uids.first)
+        #expect(uid.id == "pair-id-1")
+        #expect(uid.atype == 571187)
+    }
+
+    @Test("A PAIR envelope carrying several IDs registers all of them")
+    func pairEnvelopeWithMultipleIds() throws {
+        defer { Nimbus.configuration.identity.clear() }
+
+        Sample.response(envelopes: [
+            Sample.envelope(25, value: Self.twoPairIds, source: "pairIds")
+        ]).applyToNimbus()
+
+        let eid = try #require(Nimbus.configuration.identity.extendedIds["google.com"])
+        #expect(Set(eid.uids.map(\.id)) == ["pair-id-1", "pair-id-2"])
+    }
+
+    @Test("ATS and PAIR envelopes register under separate sources")
+    func atsAndPairTogether() throws {
+        defer { Nimbus.configuration.identity.clear() }
+
+        Sample.response(envelopes: [
+            Sample.envelope(19, value: "ats-envelope"),
+            Sample.envelope(25, value: Self.onePairId, source: "pairIds"),
+        ]).applyToNimbus()
+
+        #expect(Nimbus.configuration.identity.extendedIds["liveramp.com"]?.uids.count == 1)
+        #expect(Nimbus.configuration.identity.extendedIds["google.com"]?.uids.count == 1)
+    }
+
+    @Test("The documented sample payload applies both envelopes")
+    func documentedSamplePayload() throws {
+        defer { Nimbus.configuration.identity.clear() }
+
+        let response = try JSONDecoder().decode(
+            LiveRamp.EnvelopeResponse.self,
+            from: Data(Sample.envelopeJSON.utf8)
+        )
+        response.applyToNimbus()
+
+        #expect(Nimbus.configuration.identity.extendedIds["liveramp.com"] != nil)
+
+        let pair = try #require(Nimbus.configuration.identity.extendedIds["google.com"])
+        #expect(pair.uids.map(\.id) == ["AyXb5Atvk/U/1CWvz2nEY9hYxOX7MQOQ2UBMA0WbWVEm"])
+    }
+
+    @Test("Unhandled envelope types register nothing", arguments: [24, 26, 27, 99])
+    func unhandledTypes(rawType: Int) {
+        defer { Nimbus.configuration.identity.clear() }
+
+        Sample.response(envelopes: [Sample.envelope(rawType, value: "value")]).applyToNimbus()
+
+        #expect(Nimbus.configuration.identity.extendedIds.isEmpty)
+    }
+
+    @Test("An empty envelope list registers nothing")
+    func emptyEnvelopes() {
+        defer { Nimbus.configuration.identity.clear() }
+
+        Sample.response(envelopes: []).applyToNimbus()
+
+        #expect(Nimbus.configuration.identity.extendedIds.isEmpty)
+    }
+
+    @Test("A PAIR value that isn't decodable registers nothing", arguments: [
+        "not base64 at all!",
+        pairObject,
+        noPairIds,
+    ])
+    func undecodablePairValues(value: String) {
+        defer { Nimbus.configuration.identity.clear() }
+
+        Sample.response(envelopes: [Sample.envelope(25, value: value, source: "pairIds")]).applyToNimbus()
+
+        // An empty array still produces an EID with no UIDs rather than nothing at
+        // all, so assert on the UID count rather than on the source being absent.
+        #expect(Nimbus.configuration.identity.extendedIds["google.com"]?.uids.isEmpty ?? true)
+    }
+
+    @Test("A bad PAIR envelope does not stop a good ATS envelope from applying")
+    func oneBadEnvelopeDoesNotBlockTheRest() {
+        defer { Nimbus.configuration.identity.clear() }
+
+        Sample.response(envelopes: [
+            Sample.envelope(25, value: "not base64 at all!", source: "pairIds"),
+            Sample.envelope(19, value: "ats-envelope"),
+        ]).applyToNimbus()
+
+        #expect(Nimbus.configuration.identity.extendedIds["liveramp.com"]?.uids.count == 1)
+    }
+
+    @Test("Two envelopes of the same type: the last one wins")
+    func sameSourceOverwrites() throws {
+        defer { Nimbus.configuration.identity.clear() }
+
+        // add(source:ids:) assigns extendedIds[source] rather than merging, so a
+        // response carrying two ATS envelopes keeps only the second.
+        Sample.response(envelopes: [
+            Sample.envelope(19, value: "first"),
+            Sample.envelope(19, value: "second"),
+        ]).applyToNimbus()
+
+        let eid = try #require(Nimbus.configuration.identity.extendedIds["liveramp.com"])
+        #expect(eid.uids.count == 1)
+        #expect(eid.uids.first?.id == "second")
+    }
+    
+    @Test("A stored envelope comes back with its timestamps intact")
+    func storeAndLoad() throws {
+        defer { LiveRamp.clear() }
+
+        let created = Date(timeIntervalSince1970: 1_000_000)
+        let stored = Sample.response(lastRefreshTime: created)
+
+        LiveRamp.store(stored)
+        let loaded = try #require(LiveRamp.getEnvelope())
+
+        #expect(loaded.lastRefreshTime.timeIntervalSince1970 == created.timeIntervalSince1970)
+        #expect(loaded.envelopes.count == stored.envelopes.count)
+        #expect(loaded.envelopes[0].value == stored.envelopes[0].value)
+    }
+
+    @Test("Storing twice replaces rather than accumulates")
+    func storeReplaces() throws {
+        defer { LiveRamp.clear() }
+
+        LiveRamp.store(Sample.response(envelopes: [Sample.envelope(19, value: "first")]))
+        LiveRamp.store(Sample.response(envelopes: [Sample.envelope(19, value: "second")]))
+
+        let loaded = try #require(LiveRamp.getEnvelope())
+        #expect(loaded.envelopes.count == 1)
+        #expect(loaded.envelopes[0].value == "second")
+    }
+
+    @Test("Nothing stored returns nil")
+    func nothingStored() {
+        #expect(LiveRamp.getEnvelope() == nil)
+    }
+
+    @Test("Corrupt stored data returns nil rather than throwing")
+    func corruptData() {
+        defer { LiveRamp.clear() }
+
+        UserDefaults.standard.set(Data("garbage".utf8), forKey: LiveRamp.storedEnvelopeKey)
+        #expect(LiveRamp.getEnvelope() == nil)
+    }
+
+    @Test("Clearing removes the stored envelope")
+    func clear() {
+        LiveRamp.store(Sample.response())
+        #expect(LiveRamp.getEnvelope() != nil)
+
+        LiveRamp.clear()
+        #expect(LiveRamp.getEnvelope() == nil)
     }
 }
 
@@ -496,222 +695,5 @@ struct RefreshRequestTests {
 
         let request = try LiveRamp.refreshRequest(from: base, storedResponse: stored)
         #expect(request.values(for: "iv") == [value])
-    }
-}
-
-// MARK: - Storage
-
-/// These share `UserDefaults.standard`, so they run one at a time and clear the
-/// key before and after each test.
-@Suite("Storage", .serialized)
-@MainActor
-struct StorageTests {
-
-    init() {
-        LiveRamp.clear()
-    }
-
-    @Test("A stored envelope comes back with its timestamps intact")
-    func storeAndLoad() throws {
-        defer { LiveRamp.clear() }
-
-        let created = Date(timeIntervalSince1970: 1_000_000)
-        let stored = Sample.response(lastRefreshTime: created)
-
-        LiveRamp.store(stored)
-        let loaded = try #require(LiveRamp.getEnvelope())
-
-        #expect(loaded.lastRefreshTime.timeIntervalSince1970 == created.timeIntervalSince1970)
-        #expect(loaded.envelopes.count == stored.envelopes.count)
-        #expect(loaded.envelopes[0].value == stored.envelopes[0].value)
-    }
-
-    @Test("Storing twice replaces rather than accumulates")
-    func storeReplaces() throws {
-        defer { LiveRamp.clear() }
-
-        LiveRamp.store(Sample.response(envelopes: [Sample.envelope(19, value: "first")]))
-        LiveRamp.store(Sample.response(envelopes: [Sample.envelope(19, value: "second")]))
-
-        let loaded = try #require(LiveRamp.getEnvelope())
-        #expect(loaded.envelopes.count == 1)
-        #expect(loaded.envelopes[0].value == "second")
-    }
-
-    @Test("Nothing stored returns nil")
-    func nothingStored() {
-        #expect(LiveRamp.getEnvelope() == nil)
-    }
-
-    @Test("Corrupt stored data returns nil rather than throwing")
-    func corruptData() {
-        defer { LiveRamp.clear() }
-
-        UserDefaults.standard.set(Data("garbage".utf8), forKey: LiveRamp.storedEnvelopeKey)
-        #expect(LiveRamp.getEnvelope() == nil)
-    }
-
-    @Test("Clearing removes the stored envelope")
-    func clear() {
-        LiveRamp.store(Sample.response())
-        #expect(LiveRamp.getEnvelope() != nil)
-
-        LiveRamp.clear()
-        #expect(LiveRamp.getEnvelope() == nil)
-    }
-}
-
-// MARK: - Applying to Nimbus
-
-/// These mutate `Nimbus.configuration.identity`, which is global, so they run one
-/// at a time and reset it around each test.
-@MainActor
-@Suite("Applying to Nimbus", .serialized)
-struct ApplyToNimbusTests {
-
-    /// Base64 of `["pair-id-1"]`.
-    static let onePairId = "WyJwYWlyLWlkLTEiXQ=="
-    /// Base64 of `["pair-id-1","pair-id-2"]`.
-    static let twoPairIds = "WyJwYWlyLWlkLTEiLCJwYWlyLWlkLTIiXQ=="
-    /// Base64 of `[]`.
-    static let noPairIds = "W10="
-    /// Base64 of `{"not":"an array"}` — decodes fine, but isn't `[String]`.
-    static let pairObject = "eyJub3QiOiJhbiBhcnJheSJ9"
-
-    init() {
-        Nimbus.configuration.identity.clear()
-    }
-
-    @Test("An ATS envelope registers under liveramp.com")
-    func atsEnvelope() throws {
-        defer { Nimbus.configuration.identity.clear() }
-
-        Sample.response(envelopes: [Sample.envelope(19, value: "ats-envelope")]).applyToNimbus()
-
-        let eid = try #require(Nimbus.configuration.identity.extendedIds["liveramp.com"])
-        #expect(eid.source == "liveramp.com")
-        #expect(eid.uids.count == 1)
-
-        let uid = try #require(eid.uids.first)
-        #expect(uid.id == "ats-envelope")
-        #expect(uid.ext["rtiPartner"] == "idl")
-    }
-
-    @Test("A PAIR envelope registers its decoded IDs under google.com")
-    func pairEnvelope() throws {
-        defer { Nimbus.configuration.identity.clear() }
-
-        Sample.response(envelopes: [
-            Sample.envelope(25, value: Self.onePairId, source: "pairIds")
-        ]).applyToNimbus()
-
-        let eid = try #require(Nimbus.configuration.identity.extendedIds["google.com"])
-        #expect(eid.uids.count == 1)
-
-        let uid = try #require(eid.uids.first)
-        #expect(uid.id == "pair-id-1")
-        #expect(uid.atype == 571187)
-    }
-
-    @Test("A PAIR envelope carrying several IDs registers all of them")
-    func pairEnvelopeWithMultipleIds() throws {
-        defer { Nimbus.configuration.identity.clear() }
-
-        Sample.response(envelopes: [
-            Sample.envelope(25, value: Self.twoPairIds, source: "pairIds")
-        ]).applyToNimbus()
-
-        let eid = try #require(Nimbus.configuration.identity.extendedIds["google.com"])
-        #expect(Set(eid.uids.map(\.id)) == ["pair-id-1", "pair-id-2"])
-    }
-
-    @Test("ATS and PAIR envelopes register under separate sources")
-    func atsAndPairTogether() throws {
-        defer { Nimbus.configuration.identity.clear() }
-
-        Sample.response(envelopes: [
-            Sample.envelope(19, value: "ats-envelope"),
-            Sample.envelope(25, value: Self.onePairId, source: "pairIds"),
-        ]).applyToNimbus()
-
-        #expect(Nimbus.configuration.identity.extendedIds["liveramp.com"]?.uids.count == 1)
-        #expect(Nimbus.configuration.identity.extendedIds["google.com"]?.uids.count == 1)
-    }
-
-    @Test("The documented sample payload applies both envelopes")
-    func documentedSamplePayload() throws {
-        defer { Nimbus.configuration.identity.clear() }
-
-        let response = try JSONDecoder().decode(
-            LiveRamp.EnvelopeResponse.self,
-            from: Data(Sample.envelopeJSON.utf8)
-        )
-        response.applyToNimbus()
-
-        #expect(Nimbus.configuration.identity.extendedIds["liveramp.com"] != nil)
-
-        let pair = try #require(Nimbus.configuration.identity.extendedIds["google.com"])
-        #expect(pair.uids.map(\.id) == ["AyXb5Atvk/U/1CWvz2nEY9hYxOX7MQOQ2UBMA0WbWVEm"])
-    }
-
-    @Test("Unhandled envelope types register nothing", arguments: [24, 26, 27, 99])
-    func unhandledTypes(rawType: Int) {
-        defer { Nimbus.configuration.identity.clear() }
-
-        Sample.response(envelopes: [Sample.envelope(rawType, value: "value")]).applyToNimbus()
-
-        #expect(Nimbus.configuration.identity.extendedIds.isEmpty)
-    }
-
-    @Test("An empty envelope list registers nothing")
-    func emptyEnvelopes() {
-        defer { Nimbus.configuration.identity.clear() }
-
-        Sample.response(envelopes: []).applyToNimbus()
-
-        #expect(Nimbus.configuration.identity.extendedIds.isEmpty)
-    }
-
-    @Test("A PAIR value that isn't decodable registers nothing", arguments: [
-        "not base64 at all!",
-        pairObject,
-        noPairIds,
-    ])
-    func undecodablePairValues(value: String) {
-        defer { Nimbus.configuration.identity.clear() }
-
-        Sample.response(envelopes: [Sample.envelope(25, value: value, source: "pairIds")]).applyToNimbus()
-
-        // An empty array still produces an EID with no UIDs rather than nothing at
-        // all, so assert on the UID count rather than on the source being absent.
-        #expect(Nimbus.configuration.identity.extendedIds["google.com"]?.uids.isEmpty ?? true)
-    }
-
-    @Test("A bad PAIR envelope does not stop a good ATS envelope from applying")
-    func oneBadEnvelopeDoesNotBlockTheRest() {
-        defer { Nimbus.configuration.identity.clear() }
-
-        Sample.response(envelopes: [
-            Sample.envelope(25, value: "not base64 at all!", source: "pairIds"),
-            Sample.envelope(19, value: "ats-envelope"),
-        ]).applyToNimbus()
-
-        #expect(Nimbus.configuration.identity.extendedIds["liveramp.com"]?.uids.count == 1)
-    }
-
-    @Test("Two envelopes of the same type: the last one wins")
-    func sameSourceOverwrites() throws {
-        defer { Nimbus.configuration.identity.clear() }
-
-        // add(source:ids:) assigns extendedIds[source] rather than merging, so a
-        // response carrying two ATS envelopes keeps only the second.
-        Sample.response(envelopes: [
-            Sample.envelope(19, value: "first"),
-            Sample.envelope(19, value: "second"),
-        ]).applyToNimbus()
-
-        let eid = try #require(Nimbus.configuration.identity.extendedIds["liveramp.com"])
-        #expect(eid.uids.count == 1)
-        #expect(eid.uids.first?.id == "second")
     }
 }
